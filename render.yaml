@@ -1,0 +1,27 @@
+# Render Blueprint for the Mo Hisab API.
+# The API builds from the Dockerfile. Secrets are NOT stored here: Render asks for each
+# value marked `sync: false` when you create the blueprint.
+services:
+  - type: web
+    name: mohisab-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free                # free sleeps after ~15 minutes without traffic; use starter for always-on
+    region: singapore         # closest Render region to the Mumbai Supabase project
+    healthCheckPath: /health
+    autoDeploy: true          # redeploy on every push to the branch
+    envVars:
+      # Supabase TRANSACTION POOLER url (port 6543), password URL-encoded (@ becomes %40).
+      # Render has no IPv6, so do not use the db.<ref>.supabase.co direct host.
+      - key: DATABASE_URL
+        sync: false
+      # https://<project-ref>.supabase.co
+      - key: SUPABASE_URL
+        sync: false
+      # Server-side only. Used for logo uploads; never put it in the mobile app.
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      # DEV ONLY: turns on /auth/otp/* where ANY phone number and ANY code logs in.
+      # Leave this empty once real Supabase phone login is set up.
+      - key: DEV_AUTH_SECRET
+        sync: false
