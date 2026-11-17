@@ -149,3 +149,58 @@ func (h Handler) Logo(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusCreated, map[string]any{"url": h.Storage.PublicPrefix() + key})
 }
+
+// ---------- private buckets (backups and exports) ----------
+
+// EnsurePrivateBucket creates a non-public bucket when it does not exist yet.
+func (s *Storage) EnsurePrivateBucket(ctx context.Context, name string) error {
+	body, _ := json.Marshal(map[string]any{"id": name, "name": name, "public": false})
+	resp, err := s.do(ctx, http.MethodPost, "/bucket", "application/json", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	switch {
+	case resp.StatusCode < 300:
+		return nil
+	case strings.Contains(strings.ToLower(string(msg)), "already exists"), resp.StatusCode == http.StatusConflict:
+		return nil
+	}
+	return fmt.Errorf("create bucket: %s: %s", resp.Status, msg)
+}
+
+// PutObject uploads (or replaces) one file in any bucket.
+func (s *Storage) PutObject(ctx context.Context, bucket, key, contentType string, data []byte) error {
+	resp, err := s.do(ctx, http.MethodPost, "/object/"+bucket+"/"+key, contentType, data)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("upload: %s: %s", resp.Status, msg)
+	}
+	return nil
+}
+
+// SignedURL returns a download link for a private file that works for `seconds` seconds.
+func (s *Storage) SignedURL(ctx context.Context, bucket, key string, seconds int) (string, error) {
+	body, _ := json.Marshal(map[string]int{"expiresIn": seconds})
+	resp, err := s.do(ctx, http.MethodPost, "/object/sign/"+bucket+"/"+key, "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("sign: %s: %s", resp.Status, raw)
+	}
+	var out struct {
+		SignedURL string `json:"signedURL"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil || out.SignedURL == "" {
+		return "", fmt.Errorf("sign: unexpected response")
+	}
+	return s.BaseURL + out.SignedURL, nil
+}

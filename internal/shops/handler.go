@@ -1,28 +1,34 @@
 package shops
 
 import (
+	"errors"
+	"log"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mohisab-api/internal/auth"
 	"mohisab-api/internal/httpx"
+	"mohisab-api/internal/profile"
 )
 
 type Handler struct {
 	DB *pgxpool.Pool
 	// LogoPrefix, when set, is the only allowed start of logo_url (our storage bucket).
 	LogoPrefix string
+	TrialDays  int // length of the free trial created with the shop (0 = 14)
 }
 
 type shopOut struct {
-	ID         uuid.UUID `json:"id"`
-	Name       string    `json:"name"`
-	Role       string    `json:"role"`
-	LogoURL    *string   `json:"logo_url"`
-	Categories []string  `json:"categories"`
+	ID         uuid.UUID     `json:"id"`
+	Name       string        `json:"name"`
+	Role       string        `json:"role"`
+	LogoURL    *string       `json:"logo_url"`
+	Categories []string      `json:"categories"`
+	Locations  []locationOut `json:"locations"`
 }
 
 // What the shop can sell. Matches items.category.
@@ -30,27 +36,68 @@ var allowedCategories = map[string]bool{
 	"chicken": true, "fish": true, "eggs": true, "mutton": true, "dairy": true,
 }
 
-// GET /v1/me — shops this user belongs to.
+// GET /v1/me — the user and the shops they belong to (with each shop's locations).
 func (h Handler) Me(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.DB.Query(r.Context(), `
+	ctx := r.Context()
+	uid := auth.UserID(ctx)
+	var phone string
+	var name, photo *string
+	lang := "en"
+	err := h.DB.QueryRow(ctx, `
+		select coalesce(a.phone, ''), p.name, p.photo_url, coalesce(p.language, 'en')
+		from auth.users a left join profiles p on p.user_id = a.id where a.id = $1`, uid).Scan(&phone, &name, &photo, &lang)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		httpx.Error(w, http.StatusInternalServerError, "database error")
+		return
+	}
+	// A staff invite waits for this phone to log in; accept it now.
+	if err := profile.AttachInvites(ctx, h.DB, uid, phone); err != nil {
+		log.Printf("attach invites: %v", err)
+	}
+	rows, err := h.DB.Query(ctx, `
 		select s.id, s.name, m.role, s.logo_url, s.categories
 		from members m join shops s on s.id = m.shop_id
-		where m.user_id = $1 order by s.created_at`, auth.UserID(r.Context()))
+		where m.user_id = $1 and m.status = 'active' order by s.created_at`, uid)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "database error")
 		return
 	}
-	defer rows.Close()
 	shops := []shopOut{}
 	for rows.Next() {
 		var s shopOut
 		if err := rows.Scan(&s.ID, &s.Name, &s.Role, &s.LogoURL, &s.Categories); err != nil {
+			rows.Close()
 			httpx.Error(w, http.StatusInternalServerError, "database error")
 			return
 		}
+		s.Locations = []locationOut{}
 		shops = append(shops, s)
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"user_id": auth.UserID(r.Context()), "shops": shops})
+	rows.Close()
+	for i := range shops {
+		lr, err := h.DB.Query(ctx, `
+			select id, name, type, lat, lng, active from locations
+			where shop_id = $1 and ($2::text <> 'farm_manager' or type = 'farm') order by type, created_at`, shops[i].ID, shops[i].Role)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "database error")
+			return
+		}
+		for lr.Next() {
+			var l locationOut
+			if err := lr.Scan(&l.ID, &l.Name, &l.Type, &l.Lat, &l.Lng, &l.Active); err != nil {
+				lr.Close()
+				httpx.Error(w, http.StatusInternalServerError, "database error")
+				return
+			}
+			shops[i].Locations = append(shops[i].Locations, l)
+		}
+		lr.Close()
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"user_id": uid,
+		"user":    map[string]any{"id": uid, "name": name, "phone": phone, "photo_url": photo, "language": lang},
+		"shops":   shops,
+	})
 }
 
 type createShopIn struct {
@@ -89,11 +136,12 @@ func (g *geoIn) check(label string) string {
 }
 
 type locationOut struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
-	Type string    `json:"type"`
-	Lat  *float64  `json:"lat"`
-	Lng  *float64  `json:"lng"`
+	ID     uuid.UUID `json:"id"`
+	Name   string    `json:"name"`
+	Type   string    `json:"type"`
+	Lat    *float64  `json:"lat"`
+	Lng    *float64  `json:"lng"`
+	Active bool      `json:"active"`
 }
 
 // POST /v1/shops — onboarding: creates the shop, makes the caller owner, adds locations.
@@ -185,6 +233,16 @@ func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	days := h.TrialDays
+	if days <= 0 {
+		days = 14
+	}
+	if _, err := tx.Exec(ctx, `insert into subscriptions (shop_id, plan, trial_ends_at) values ($1, 'trial', now() + make_interval(days => $2::int))`,
+		shopID, days); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "database error")
+		return
+	}
+
 	locations := []locationOut{}
 	add := func(name, typ string, g *geoIn) error {
 		var lat, lng *float64
@@ -194,8 +252,8 @@ func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
 		var l locationOut
 		if err := tx.QueryRow(ctx, `
 			insert into locations (shop_id, name, type, lat, lng) values ($1, $2, $3, $4, $5)
-			returning id, name, type, lat, lng`,
-			shopID, name, typ, lat, lng).Scan(&l.ID, &l.Name, &l.Type, &l.Lat, &l.Lng); err != nil {
+			returning id, name, type, lat, lng, active`,
+			shopID, name, typ, lat, lng).Scan(&l.ID, &l.Name, &l.Type, &l.Lat, &l.Lng, &l.Active); err != nil {
 			return err
 		}
 		locations = append(locations, l)

@@ -147,7 +147,7 @@ func TestValidation400(t *testing.T) {
 		{"rates: zero price", "PUT", "/prices", `{"prices":[{"item_id":"` + cat + `","price":0}]}`, "more than 0"},
 		{"rates: unknown field", "PUT", "/prices", `{"prices":[{"item_id":"` + cat + `","price":5}],"x":1}`, "invalid body"},
 		{"patch: bad id", "PATCH", "/prices/items/abc", `{"name":"X"}`, "invalid item id"},
-		{"patch: empty body", "PATCH", "/prices/items/" + cat, `{}`, "send name, unit or active"},
+		{"patch: empty body", "PATCH", "/prices/items/" + cat, `{}`, "send name, unit, category or active"},
 		{"patch: bad unit", "PATCH", "/prices/items/" + cat, `{"unit":"box"}`, "unit must be"},
 		{"patch: blank name", "PATCH", "/prices/items/" + cat, `{"name":"  "}`, "name must be"},
 	}

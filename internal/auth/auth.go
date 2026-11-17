@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -46,6 +48,48 @@ func (m Member) Location() *time.Location {
 type Verifier struct {
 	keyfunc jwt.Keyfunc
 	issuer  string
+	// revoked, when set, says whether a token (by hash) was logged out.
+	revoked func(ctx context.Context, hash string) (bool, error)
+}
+
+// TokenHash is how a token is remembered after logout: the raw token is never stored.
+func TokenHash(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+// WithRevocation makes the verifier reject tokens that were logged out (see Logout).
+func (v *Verifier) WithRevocation(pool *pgxpool.Pool) *Verifier {
+	v.revoked = func(ctx context.Context, hash string) (bool, error) {
+		var gone bool
+		err := pool.QueryRow(ctx, `select exists(select 1 from revoked_tokens where token_hash = $1)`, hash).Scan(&gone)
+		return gone, err
+	}
+	return v
+}
+
+// Logout (POST /auth/logout, behind RequireUser) revokes the token it was called with, so it stops
+// working at once on every route. The row is kept until the token would have expired anyway.
+func Logout(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		claims := jwt.MapClaims{}
+		_, _, _ = jwt.NewParser().ParseUnverified(raw, claims) // already verified by RequireUser
+		exp, err := claims.GetExpirationTime()
+		if err != nil || exp == nil {
+			httpx.Error(w, http.StatusUnauthorized, "invalid token")
+			return
+		}
+		ctx := r.Context()
+		if _, err := pool.Exec(ctx, `
+			insert into revoked_tokens (token_hash, user_id, expires_at) values ($1, $2, $3)
+			on conflict (token_hash) do nothing`, TokenHash(raw), UserID(ctx), exp.Time); err != nil {
+			httpx.Fail(w, err)
+			return
+		}
+		_, _ = pool.Exec(ctx, `delete from revoked_tokens where expires_at < now()`) // housekeeping
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // NewVerifier checks Supabase access tokens.
@@ -115,6 +159,17 @@ func (v *Verifier) RequireUser(next http.Handler) http.Handler {
 			httpx.Error(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
+		if v.revoked != nil {
+			gone, err := v.revoked(r.Context(), TokenHash(raw))
+			if err != nil {
+				httpx.Error(w, http.StatusInternalServerError, "database error")
+				return
+			}
+			if gone {
+				httpx.Error(w, http.StatusUnauthorized, "token was logged out")
+				return
+			}
+		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, uid)))
 	})
 }
@@ -131,7 +186,7 @@ func RequireShop(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			var role, tz string
 			err = pool.QueryRow(r.Context(),
 				`select m.role, s.timezone from members m join shops s on s.id = m.shop_id
-				 where m.shop_id = $1 and m.user_id = $2`,
+				 where m.shop_id = $1 and m.user_id = $2 and m.status = 'active'`,
 				shopID, UserID(r.Context())).Scan(&role, &tz)
 			if errors.Is(err, pgx.ErrNoRows) {
 				httpx.Error(w, http.StatusForbidden, "not a member of this shop")

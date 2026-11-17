@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -18,6 +19,8 @@ type Config struct {
 	// Logo uploads. Leave the service key empty to disable POST /v1/uploads/logo.
 	SupabaseServiceKey string
 	StorageURL         string // default: <SUPABASE_URL>/storage/v1
+
+	TrialDays int // length of the free trial for a new shop (TRIAL_DAYS, default 14)
 }
 
 func Load() Config {
@@ -32,6 +35,10 @@ func Load() Config {
 
 		SupabaseServiceKey: os.Getenv("SUPABASE_SERVICE_KEY"),
 		StorageURL:         os.Getenv("SUPABASE_STORAGE_URL"),
+	}
+	c.TrialDays = 14
+	if n, err := strconv.Atoi(os.Getenv("TRIAL_DAYS")); err == nil && n > 0 {
+		c.TrialDays = n
 	}
 	if c.DatabaseURL == "" || c.SupabaseURL == "" {
 		log.Fatal("DATABASE_URL and SUPABASE_URL are required")

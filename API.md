@@ -1,6 +1,7 @@
 # Mo Hisab API — request and response reference
 
-Base URL (local): `http://localhost:8080`
+Base URL (live): `https://mohisab-api.onrender.com` — local: `http://localhost:8080`
+Health check: `GET /health` returns `{"status":"ok"}`. The free Render plan sleeps when idle, so the first call can take up to a minute.
 All bodies are JSON (`Content-Type: application/json`). All timestamps are RFC 3339. All ids are UUIDs. All money is a plain number in rupees.
 
 ## Conventions
@@ -62,6 +63,9 @@ Every "today", "this week", "this month" and "yesterday" in this API uses the **
 | Close the day | yes | yes | no |
 | Setup tick, rewards change | yes | no | no |
 | Voice parse | yes | yes | yes |
+| Profile: read, edit own name/photo/language, devices (read) | yes | yes | yes (profile shows the farm only; plan is hidden) |
+| Staff list, devices (change) | yes | yes | no |
+| Edit shop, categories, locations, offer, staff invite/change/remove, plan, backup, export | yes | no | no |
 
 A farm manager who sends another location, or asks for all locations, only ever gets the farm location. Asking for a shop location returns `403`.
 
@@ -123,24 +127,33 @@ Errors: `400` phone or code missing. `401` wrong code (never in dev mode).
 
 ### `GET /v1/me` — token
 
-Returns the user and the shops they belong to, oldest shop first.
+Returns the user and the shops they belong to, oldest shop first. Each shop has its `locations`, so a returning user already has the `location_id` that bills need. A pending staff invite for this phone is accepted here.
 
 Response `200`
 ```json
 {
   "user_id": "347bb2a3-e506-4ef5-be08-dd44e31d7ade",
+  "user": { "id": "347bb2a3-…", "name": "Ravi Kumar", "phone": "9000000001", "photo_url": null, "language": "en" },
   "shops": [
     {
       "id": "ead632e7-8b5f-40f9-bcc6-07cf7e5ff479",
       "name": "My Shop",
       "role": "owner",
       "logo_url": "https://example.com/logo.png",
-      "categories": ["chicken", "fish", "eggs"]
+      "categories": ["chicken", "fish", "eggs"],
+      "locations": [
+        { "id": "uuid", "name": "Poultry farm", "type": "farm", "lat": 20.29, "lng": 85.82, "active": true },
+        { "id": "uuid", "name": "Shop", "type": "shop", "lat": null, "lng": null, "active": true }
+      ]
     }
   ]
 }
 ```
-`shops` is `[]` for a new user, which means the app should show onboarding. `logo_url` is `null` when no logo was set.
+`shops` is `[]` for a new user, which means the app should show onboarding. `logo_url` is `null` when no logo was set. A farm manager only sees the farm location. Removed members do not see the shop.
+
+### `PATCH /v1/me` — token
+
+Edit the profile header (name, photo, language). See section 18.
 
 ### `POST /v1/shops` — token
 
@@ -276,10 +289,12 @@ Response `200`
     "category": "chicken",
     "name": "Broiler · Boneless",
     "unit": "kg",
-    "price_today": 320
+    "price_today": 320,
+    "price_yesterday": 315
   }
 ]
 ```
+`price_yesterday` is the latest price before today, or `null`. It drives the "compare with yesterday" switch.
 
 ### `POST /v1/items` — owner
 
@@ -550,8 +565,8 @@ Copies the latest earlier price to today for every active item that has no price
 
 ### `PATCH /v1/prices/items/{id}` — owner, cashier
 
-Request: any of `{ "name": "Katla large", "unit": "piece", "active": true }`. Response `200` is the item. Renaming checks for duplicates again.
-Errors: `400` `send name, unit or active`, `name must be 1 to 80 characters`, `unit must be kg, tray, piece or bird`. `404` `item not found`. `409` `item already exists: <name>`.
+Request: any of `{ "name": "Katla large", "unit": "piece", "category": "fish", "active": true }` (`category_id` also works; see section 18). Response `200` is the item. Renaming checks for duplicates again.
+Errors: `400` `send name, unit, category or active`, `name must be 1 to 80 characters`, `unit must be kg, tray, piece or bird`. `404` `item not found`. `409` `item already exists: <name>`.
 
 ### `DELETE /v1/prices/items/{id}` — owner
 
@@ -855,6 +870,187 @@ Errors: `400` `transcript is required`, `mode must be stock_in, sale or expense`
 
 ---
 
+## 18. Profile screen
+
+One call fills the screen (`GET /v1/profile`); every sheet then has its own endpoint. All errors use `{ "error": "message" }`.
+
+### `GET /v1/profile` — shop (any role)
+
+Response `200`
+```json
+{
+  "user":  { "id": "uuid", "name": "Ravi Kumar", "phone": "9000000001", "photo_url": null, "language": "or" },
+  "shop":  { "id": "uuid", "name": "Soumya Poultry", "logo_url": null, "language": "or", "role": "owner",
+             "categories": ["chicken", "fish", "eggs"],
+             "locations": [
+               { "id": "uuid", "type": "farm", "name": "Poultry farm", "lat": 20.29, "lng": 85.82, "active": true },
+               { "id": "uuid", "type": "shop", "name": "Shop", "lat": null, "lng": null, "active": true }
+             ] },
+  "prices":  { "count": 12, "updated_today": true },
+  "offer":   { "enabled": false, "type": "discount", "discount_amount": 20, "min_bill": 500, "product": null, "multiplier": 2 },
+  "rewards": { "spend_per_point": 10, "point_value": 0.25, "expiry_months": 12, "max_pay_percent": 50 },
+  "staff":   { "count": 2 },
+  "plan":    { "plan": "trial", "trial_days_left": 11, "trial_ends_at": "2026-12-01T17:06:22+05:30",
+               "current_period_end": null, "last_backup_at": null },
+  "devices": { "whatsapp": false, "printer": false, "scale": false, "all_connected": false }
+}
+```
+- `plan` is `null` unless the caller is the owner. A farm manager sees only the farm in `shop.locations`.
+- `staff.count` counts active members and pending invites.
+- `trial_days_left` = `max(0, ceil((trial_ends_at - now) / 24h))`, and `0` when the plan is not `trial`. The trial is 14 days from shop creation (`TRIAL_DAYS` on the server).
+- `offer` is created with defaults the first time it is read. `rewards` is the same data as `GET /v1/rewards`: the server value wins over any default the app shows.
+- The shop `name` is the business name that prints on bills.
+
+### `PATCH /v1/me` — token
+
+Request (all optional, send at least one)
+```json
+{ "name": "Ravi Kumar", "photo_url": "https://…/avatar.jpg", "language": "hi" }
+```
+- `name`: trimmed, 1 to 80 characters.
+- `photo_url`: the `url` from `POST /v1/uploads/logo` (use the same upload for the avatar), or `null` to remove it.
+- `language`: `en`, `hi`, `or` or `hinglish`. This is the user's own app language.
+- The phone cannot be changed.
+
+Response `200`: the `user` object above. Errors: `400` empty body, blank name, unknown language, bad `photo_url`.
+
+### `PATCH /v1/shops/current` — owner
+
+Request (all optional)
+```json
+{ "name": "Soumya Poultry", "logo_url": "https://…/logo.png", "language": "or" }
+```
+`logo_url` follows the same rule as `photo_url` (`null` removes it). `language` is the shop language used for WhatsApp messages to customers. Response `200`: the `shop` object above.
+
+### `PUT /v1/shops/current/categories` — owner ("What you sell")
+
+Request
+```json
+{ "categories": ["chicken", "fish", "eggs"] }
+```
+Allowed: `chicken`, `fish`, `eggs`, `mutton`, `dairy`. Duplicates are removed and an empty list is allowed. Items and history are never deleted when a category is turned off, but the server hides them: `GET /v1/categories`, `GET /v1/prices` and `GET /v1/prices/today` no longer return that category or its items until it is turned on again (also turned on when you add an item to it). Custom categories are always shown. Bills, stock and past data are not affected. Response `200`: `{ "categories": ["chicken", "fish", "eggs"] }`. Errors: `400` `unknown category: pizza`.
+
+### `GET /v1/locations` — shop
+
+Response `200`: `[ { "id", "type", "name", "lat", "lng", "active" } ]`. Inactive locations are included with `active: false`. A farm manager only gets the farm.
+
+### `PUT /v1/locations` — owner ("Shops & farms")
+
+Request
+```json
+{ "has_farm": true, "has_shop": true,
+  "farm_location": { "lat": 20.29, "lng": 85.82 },
+  "shop_location": null }
+```
+- `has_farm` and `has_shop` are both required, and at least one must be true (`400` `pick at least one location`).
+- Turning one on creates it ("Poultry farm" or "Shop") or re-activates the old row. Turning one off sets `active: false`. Nothing is deleted, because bills, stock and closings point at it.
+- A position needs both `lat` (-90..90) and `lng` (-180..180), and is only allowed when that location is on. Leaving it out or sending `null` keeps the old position.
+
+Response `200`: the same list as `GET /v1/locations`.
+
+### `GET /v1/offer` — shop, and `PUT /v1/offer` — owner (offer of the day)
+
+`PUT` replaces the whole offer.
+```json
+{ "enabled": true, "type": "discount", "discount_amount": 20, "min_bill": 500, "product": null, "multiplier": 2 }
+```
+- `type` is `discount` or `points`.
+- `discount`: `discount_amount` 5 to 1000 in steps of 5, `min_bill` 50 to 100000 in steps of 50.
+- `points`: `product` is required (for example `chicken`, `fish`, `eggs`, `mutton`, `dairy`), `multiplier` is 2, 3 or 5.
+- Fields of the other type are stored but not checked.
+
+Response `200`: the offer. Errors: `400` with the field and range.
+
+### `GET /v1/offer/preview?bill_total=620` — shop
+
+Used on New bill. Response `200`
+```json
+{ "applies": true, "discount": 20, "type": "discount", "multiplier": 2, "product": null }
+```
+`applies` is true when a discount offer is on and `bill_total >= min_bill`. The bill itself does not apply the offer yet: the app shows `discount` or the points multiplier (see "Not available yet").
+
+### Reward points
+
+Use `GET /v1/rewards` and `PUT /v1/rewards` from section 16. The values are `spend_per_point` 1 to 1000, `point_value` 0.05 to 5, `expiry_months` 1 to 60, `max_pay_percent` 5 to 100. Changes only affect new bills.
+
+### Today's prices sheet
+
+- `GET /v1/prices/today` now also returns `price_yesterday` per item.
+- `PATCH /v1/items/{id}` (owner) with `{ "name", "unit", "category", "active" }`, all optional. A duplicate name in the same category returns `409`. It is the same as `PATCH /v1/prices/items/{id}`, but owner only.
+- Moving an item to another category: send `category` (`chicken`, `fish`, `eggs`, `mutton`, `dairy`, `other`, or a custom category name) or `category_id` (from `GET /v1/categories`). The item keeps its prices. If the name already exists in that category you get `409`. A name that is not a known category creates a custom category, like on create. Moving an item into a standard category switches that category on for the shop.
+- `DELETE /v1/items/{id}` (owner) hides the item (`204`). Old bills and price history keep working. `404` when the item is not in this shop.
+
+### `GET /v1/staff` — owner, cashier
+
+Owners first, then active members, then pending invites.
+```json
+[
+  { "id": "uuid", "user_id": "uuid", "name": "Ravi", "phone": "9000000001", "role": "owner", "status": "active" },
+  { "id": "uuid", "user_id": null, "name": "Mgr", "phone": "9000000003", "role": "farm_manager", "status": "invited" }
+]
+```
+`id` is what `PATCH` and `DELETE` take. For an active member it is the `user_id`, for an invite it is the invite id. The app labels: `owner` is "Owner", `cashier` is "Cashier", `farm_manager` is "Manager".
+
+### `POST /v1/staff/invite` — owner
+
+Request `{ "phone": "9000000002", "role": "cashier", "name": "Ravi" }` (`role`: `cashier` or `farm_manager`, `phone`: 10 digits, `name` optional).
+
+Response `201`: a staff row. If that phone already has an account the member is added at once (`status: "active"`). Otherwise `status: "invited"`, and the invite is accepted automatically the first time that phone logs in. Errors: `400` bad phone or role, `400` `an owner cannot be invited`, `409` `already a member`.
+
+### `PATCH /v1/staff/{id}` — owner
+
+Request `{ "role": "cashier" }`. Response `200`: the staff row. Errors: `409` `the last owner cannot be changed`, `404`.
+
+### `DELETE /v1/staff/{id}` — owner
+
+`204`. The person loses access immediately: their next request for this shop returns `403`. A pending invite is simply cancelled. Errors: `409` `the last owner cannot be removed`, `404`.
+
+### `GET /v1/devices` — shop, and `PUT /v1/devices/{device}` — owner, cashier
+
+`device` is `whatsapp`, `printer` or `scale`. Printer and scale are paired on the phone, so the phone is the source of truth and the server only remembers the status for other staff phones.
+```json
+{ "whatsapp": { "connected": false, "phone": null },
+  "printer":  { "connected": true,  "name": "TVS-3230" },
+  "scale":    { "connected": false, "name": null } }
+```
+`PUT` request: `{ "connected": true, "name": "TVS-3230" }` (`connected` required, `name` or `phone` optional). Response `200`: the same object as `GET`. Errors: `400` unknown device or `connected` missing.
+
+### `POST /v1/devices/whatsapp/test` — owner
+
+Queues a `whatsapp_test` message for the owner's phone. Response `200` `{ "queued": true }`. Nothing is sent yet (see "Not available yet").
+
+### `GET /v1/plan` — owner
+
+```json
+{ "plan": "trial", "trial_days_left": 11, "trial_ends_at": "2026-12-01T17:06:22+05:30",
+  "current_period_end": null, "last_backup_at": null }
+```
+`plan` is `trial`, `basic` or `pro`. Shops made before plans existed start their 14 day trial on first read.
+
+### `POST /v1/plan/upgrade` — owner
+
+Always `501` `{ "error": "payments not enabled" }` for now.
+
+### `POST /v1/backups` — owner, and `GET /v1/backups/latest` — owner
+
+`POST` returns `202` `{ "id": "uuid", "status": "queued" }`. A background job zips the shop's data (CSV files) into private storage. Only one backup per 5 minutes per shop: otherwise `429` with a `Retry-After: 300` header. `503` when file storage is not configured.
+
+`GET /v1/backups/latest` returns `200` `{ "status": "done", "created_at": "…" }` (`status` can also be `queued` or `failed`), or `404` `no backup yet`.
+
+### `POST /v1/exports` — owner, and `GET /v1/exports/{id}` — owner
+
+`POST` with `{ "format": "csv" }` returns `202` `{ "id": "uuid", "status": "queued" }`. Poll `GET /v1/exports/{id}` until `status` is `ready`:
+```json
+{ "id": "uuid", "status": "ready", "url": "https://…/object/sign/…?token=…", "expires_in": 900 }
+```
+`url` is a signed download link for a zip with `bills.csv`, `bill_lines.csv`, `customers.csv`, `stock.csv` and `prices.csv`, valid for 15 minutes. Ask again for a fresh link. Only this shop's data is included. `status` can also be `queued` or `failed`. Errors: `400` format is not `csv`, `404`.
+
+### `POST /auth/logout` — token
+
+Send the same `Authorization: Bearer` token you want to end. Response `204`. The server stores a hash of that token until its normal expiry, and from then on every request with it returns `401` `{ "error": "token was logged out" }`. Other tokens of the same user (other phones) keep working. After logout the app deletes the token and shows the login screen. Logging in again gives a new token. Calling logout again with the dead token returns `401`.
+
+---
+
 ## Typical app flow
 
 1. `POST /auth/otp/send`, then `POST /auth/otp/verify` and keep `access_token`.
@@ -869,8 +1065,9 @@ Errors: `400` `transcript is required`, `mode must be stock_in, sale or expense`
 
 ## Not available yet
 
-- `GET /v1/locations` (list a shop's locations later). For now the location ids come from the `POST /v1/shops` response.
+- The offer of the day is stored and previewed, but `POST /v1/bills` does not apply it yet (no automatic discount or points multiplier).
+- Logging out every device at once.
 - Sending WhatsApp messages. The rate broadcast and the owner's day summary are queued only.
 - Recording credit payments from customers (the close-day screen already counts them once they exist).
 - An opening cash float for close-day.
-- Shop settings (points rules are in `PUT /v1/rewards`; language and timezone are not editable yet), bill history, and sync.
+- Editing the shop timezone, bill history, and sync.

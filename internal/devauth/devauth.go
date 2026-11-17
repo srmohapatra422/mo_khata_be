@@ -16,6 +16,7 @@ import (
 
 	"mohisab-api/internal/httpx"
 	"mohisab-api/internal/otp"
+	"mohisab-api/internal/profile"
 )
 
 const tokenTTL = 30 * 24 * time.Hour
@@ -87,6 +88,8 @@ func (h Handler) Verify(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "database error")
 		return
 	}
+
+	_ = profile.AttachInvites(r.Context(), h.DB, uid, phone) // accept a staff invite for this phone
 
 	exp := time.Now().Add(tokenTTL)
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{

@@ -29,6 +29,7 @@ import (
 	"mohisab-api/internal/lookup"
 	"mohisab-api/internal/otp"
 	"mohisab-api/internal/pricing"
+	"mohisab-api/internal/profile"
 	"mohisab-api/internal/rewards"
 	"mohisab-api/internal/setup"
 	"mohisab-api/internal/shops"
@@ -54,6 +55,8 @@ func main() {
 		log.Fatalf("auth: %v", err)
 	}
 
+	verifier = verifier.WithRevocation(pool)
+
 	if n, err := catalog.BackfillItems(ctx, pool); err != nil {
 		log.Printf("WARNING: catalog backfill: %v", err)
 	} else if n > 0 {
@@ -74,7 +77,8 @@ func main() {
 	}
 	uploadH := uploads.Handler{Storage: storage}
 
-	shopH := shops.Handler{DB: pool, LogoPrefix: logoPrefix}
+	shopH := shops.Handler{DB: pool, LogoPrefix: logoPrefix, TrialDays: cfg.TrialDays}
+	profH := profile.Handler{DB: pool, LogoPrefix: logoPrefix, TrialDays: cfg.TrialDays, Storage: storage}
 	catH := catalogue.Handler{DB: pool}
 	custH := customers.Handler{DB: pool}
 	billH := billing.Handler{DB: pool}
@@ -111,10 +115,14 @@ func main() {
 		r.Post("/auth/otp/verify", devH.Verify)
 	}
 
+	// Logging out revokes the token on the server (it is rejected from then on).
+	r.With(verifier.RequireUser).Post("/auth/logout", auth.Logout(pool))
+
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(verifier.RequireUser)
 
 		r.Get("/me", shopH.Me)
+		r.Patch("/me", profH.PatchMe)
 		r.Post("/shops", shopH.Create)
 		r.Post("/uploads/logo", uploadH.Logo)
 
@@ -123,6 +131,15 @@ func main() {
 			r.Use(auth.RequireShop(pool))
 
 			r.Get("/prices/today", catH.Today)
+
+			// Profile screen.
+			r.Get("/profile", profH.Get)
+			r.Get("/locations", profH.GetLocations)
+			r.Get("/offer", profH.GetOffer)
+			r.Get("/offer/preview", profH.Preview)
+			r.Get("/devices", profH.GetDevices)
+			r.With(auth.RequireRoles("owner", "cashier")).Put("/devices/{device}", profH.PutDevice)
+			r.With(auth.RequireRoles("owner", "cashier")).Get("/staff", profH.ListStaff)
 			r.Get("/customers", custH.List)
 			r.With(idemS.Middleware).Post("/bills", billH.Create)
 			r.Post("/points/otp/send", otpH.Send)
@@ -163,6 +180,23 @@ func main() {
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireOwner)
 				r.Post("/items", catH.CreateItem)
+				r.Patch("/items/{id}", priceH.PatchItem)
+				r.Delete("/items/{id}", priceH.DeleteItem)
+
+				r.Patch("/shops/current", profH.PatchShop)
+				r.Put("/shops/current/categories", profH.PutCategories)
+				r.Put("/locations", profH.PutLocations)
+				r.Put("/offer", profH.PutOffer)
+				r.Post("/staff/invite", profH.Invite)
+				r.Patch("/staff/{id}", profH.PatchStaff)
+				r.Delete("/staff/{id}", profH.RemoveStaff)
+				r.Post("/devices/whatsapp/test", profH.TestWhatsApp)
+				r.Get("/plan", profH.GetPlan)
+				r.Post("/plan/upgrade", profH.Upgrade)
+				r.Post("/backups", profH.CreateBackup)
+				r.Get("/backups/latest", profH.LatestBackup)
+				r.Post("/exports", profH.CreateExport)
+				r.Get("/exports/{id}", profH.GetExport)
 				r.Put("/prices/today", catH.SetToday)
 				r.Patch("/stock/{id}", stockH.PatchReorder)
 				r.Patch("/setup/steps/{id}", setupH.Patch)

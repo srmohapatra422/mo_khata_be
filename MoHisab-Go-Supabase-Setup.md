@@ -90,7 +90,7 @@ Copy the exact URLs from your Supabase dashboard; the host names above are examp
 
 ```sql
 -- +goose Up
-create table shops (
+create table shops (  
   id uuid primary key default gen_random_uuid(),
   name text not null,
   points_per_rupees numeric not null default 10,   -- 1 point per ₹10

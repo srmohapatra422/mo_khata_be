@@ -2,6 +2,7 @@ package catalogue
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,11 +16,12 @@ import (
 type Handler struct{ DB *pgxpool.Pool }
 
 type itemOut struct {
-	ID       uuid.UUID `json:"id"`
-	Category string    `json:"category"`
-	Name     string    `json:"name"`
-	Unit     string    `json:"unit"`
-	Price    *float64  `json:"price_today"` // null if not set today
+	ID        uuid.UUID `json:"id"`
+	Category  string    `json:"category"`
+	Name      string    `json:"name"`
+	Unit      string    `json:"unit"`
+	Price     *float64  `json:"price_today"`     // null if not set today
+	Yesterday *float64  `json:"price_yesterday"` // latest price before today, for "compare with yesterday"
 }
 
 // GET /v1/prices/today — active items with today's price (falls back to latest price).
@@ -28,11 +30,15 @@ func (h Handler) Today(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.DB.Query(r.Context(), `
 		select i.id, i.category, i.name, i.unit,
 		       (select p.price::float8 from item_prices p
-		         where p.item_id = i.id and p.day <= current_date
+		         where p.item_id = i.id and p.day <= $2::date
+		         order by p.day desc limit 1),
+		       (select p.price::float8 from item_prices p
+		         where p.item_id = i.id and p.day < $2::date
 		         order by p.day desc limit 1)
-		from items i
+		from items i join shops s on s.id = i.shop_id
 		where i.shop_id = $1 and i.active
-		order by i.category, i.name`, m.ShopID)
+		  and (i.category = 'other' or i.category = any(s.categories))
+		order by i.category, i.name`, m.ShopID, time.Now().In(m.Location()).Format("2006-01-02"))
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "database error")
 		return
@@ -41,7 +47,7 @@ func (h Handler) Today(w http.ResponseWriter, r *http.Request) {
 	out := []itemOut{}
 	for rows.Next() {
 		var it itemOut
-		if err := rows.Scan(&it.ID, &it.Category, &it.Name, &it.Unit, &it.Price); err != nil {
+		if err := rows.Scan(&it.ID, &it.Category, &it.Name, &it.Unit, &it.Price, &it.Yesterday); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "database error")
 			return
 		}

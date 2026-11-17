@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -72,8 +73,11 @@ func queryItems(ctx context.Context, q db.Querier, shopID uuid.UUID, day string,
 		select i.id, c.id, c.key, c.name, i.name, i.unit,
 		       (select p.price::float8 from item_prices p where p.item_id = i.id and p.day <= $2::date order by p.day desc limit 1),
 		       (select p.price::float8 from item_prices p where p.item_id = i.id and p.day <  $2::date order by p.day desc limit 1)
-		from items i join categories c on c.id = i.category_id
-		where i.shop_id = $1 and case when $3::uuid is null then i.active else i.id = $3::uuid end
+		from items i join categories c on c.id = i.category_id join shops s on s.id = i.shop_id
+		where i.shop_id = $1
+		  and case when $3::uuid is null
+		       then i.active and (c.key is null or c.key = any(s.categories))  -- categories switched off are hidden
+		       else i.id = $3::uuid end
 		order by array_position(array['chicken','fish','eggs','mutton','dairy'], c.key), c.name, i.name`,
 		shopID, day, onlyID)
 	if err != nil {
@@ -459,9 +463,11 @@ func (h Handler) KeepYesterday(w http.ResponseWriter, r *http.Request) {
 // ---------- editing items ----------
 
 type patchItemIn struct {
-	Name   *string `json:"name"`
-	Unit   *string `json:"unit"`
-	Active *bool   `json:"active"`
+	Name       *string    `json:"name"`
+	Unit       *string    `json:"unit"`
+	Active     *bool      `json:"active"`
+	Category   *string    `json:"category"`    // key (chicken, fish, ..., other) or a category name
+	CategoryID *uuid.UUID `json:"category_id"` // or the id from GET /v1/categories
 }
 
 // PATCH /v1/prices/items/{id} (owner, cashier)
@@ -476,9 +482,17 @@ func (h Handler) PatchItem(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if in.Name == nil && in.Unit == nil && in.Active == nil {
-		httpx.Error(w, http.StatusBadRequest, "send name, unit or active")
+	if in.Name == nil && in.Unit == nil && in.Active == nil && in.Category == nil && in.CategoryID == nil {
+		httpx.Error(w, http.StatusBadRequest, "send name, unit, category or active")
 		return
+	}
+	if in.Category != nil {
+		c := strings.TrimSpace(*in.Category)
+		if c == "" || utf8.RuneCountInString(c) > 60 {
+			httpx.Error(w, http.StatusBadRequest, "category must be 1 to 60 characters")
+			return
+		}
+		in.Category = &c
 	}
 	if in.Name != nil {
 		n := strings.TrimSpace(*in.Name)
@@ -520,6 +534,35 @@ func (h Handler) PatchItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	newName, newUnit, newActive := curName, curUnit, curActive
+	newCat, newCatKey, catChanged := catID, "", false
+	if in.Category != nil || in.CategoryID != nil {
+		var cat catalog.Category
+		var cerr error
+		switch {
+		case in.CategoryID != nil:
+			cat, cerr = catalog.Resolve(ctx, tx, m.ShopID, in.CategoryID, "")
+		case slices.Contains([]string{"chicken", "fish", "eggs", "mutton", "dairy", "other"}, strings.ToLower(*in.Category)):
+			cat, cerr = catalog.ByKey(ctx, tx, m.ShopID, strings.ToLower(*in.Category))
+		default:
+			cat, cerr = catalog.Resolve(ctx, tx, m.ShopID, nil, *in.Category) // a custom category name
+		}
+		if errors.Is(cerr, catalog.ErrUnknownCategory) {
+			httpx.Error(w, http.StatusBadRequest, "unknown category")
+			return
+		}
+		if cerr != nil {
+			httpx.Fail(w, cerr)
+			return
+		}
+		newCat, newCatKey, catChanged = cat.ID, catalog.ItemCategoryValue(cat), cat.ID != catID
+		if cat.Key != nil && catChanged {
+			// Moving an item into a category switches that category on.
+			if err := catalog.AddToShop(ctx, tx, m.ShopID, *cat.Key); err != nil {
+				httpx.Fail(w, err)
+				return
+			}
+		}
+	}
 	if in.Name != nil {
 		newName = *in.Name
 	}
@@ -530,11 +573,11 @@ func (h Handler) PatchItem(w http.ResponseWriter, r *http.Request) {
 		newActive = *in.Active
 	}
 	norm := names.NormalizeName(newName)
-	if newActive && (newName != curName || !curActive) {
+	if newActive && (newName != curName || !curActive || catChanged) {
 		var dup bool
 		if err := tx.QueryRow(ctx, `
 			select exists(select 1 from items where shop_id = $1 and category_id = $2 and name_norm = $3 and active and id <> $4)`,
-			m.ShopID, catID, norm, id).Scan(&dup); err != nil {
+			m.ShopID, newCat, norm, id).Scan(&dup); err != nil {
 			httpx.Fail(w, err)
 			return
 		}
@@ -543,8 +586,11 @@ func (h Handler) PatchItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, err := tx.Exec(ctx, `update items set name = $2, name_norm = $3, unit = $4, active = $5 where id = $1`,
-		id, newName, norm, newUnit, newActive); err != nil {
+	if _, err := tx.Exec(ctx, `
+		update items set name = $2, name_norm = $3, unit = $4, active = $5,
+		  category_id = $6::uuid, category = case when $7::text = '' then category else $7::text end
+		where id = $1`,
+		id, newName, norm, newUnit, newActive, newCat, newCatKey); err != nil {
 		if isUniqueViolation(err) {
 			httpx.Error(w, http.StatusConflict, "item already exists: "+newName)
 			return

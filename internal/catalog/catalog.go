@@ -51,8 +51,9 @@ func List(ctx context.Context, q db.Querier, shopID uuid.UUID) ([]Category, erro
 		return nil, err
 	}
 	rows, err := q.Query(ctx, `
-		select id, key, name, kind from categories where shop_id = $1
-		order by array_position(array['chicken','fish','eggs','mutton','dairy'], key), created_at`, shopID)
+		select c.id, c.key, c.name, c.kind from categories c join shops s on s.id = c.shop_id
+		where c.shop_id = $1 and (c.key is null or c.key = any(s.categories))
+		order by array_position(array['chicken','fish','eggs','mutton','dairy'], c.key), c.created_at`, shopID)
 	if err != nil {
 		return nil, err
 	}
