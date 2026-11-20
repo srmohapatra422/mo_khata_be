@@ -62,6 +62,7 @@ type itemOut struct {
 	IsLow          bool       `json:"is_low"`
 	LastInAt       *time.Time `json:"last_in_at"`
 	LastInQuantity *float64   `json:"last_in_quantity"`
+	LastInRate     *float64   `json:"last_in_rate"` // buying price per unit of the last stock-in
 }
 
 type row struct {
@@ -74,10 +75,10 @@ func load(ctx context.Context, q db.Querier, shopID uuid.UUID, locs, ids []strin
 	rows, err := q.Query(ctx, `
 		select s.id, s.location_id, s.name, s.name_norm, s.quantity::float8, s.unit, s.reorder_level::float8,
 		       (s.reorder_level is not null and s.quantity <= s.reorder_level),
-		       li.created_at, li.quantity::float8
+		       li.created_at, li.quantity::float8, li.rate::float8
 		from stock_items s
 		left join lateral (
-		    select m.created_at, m.quantity from stock_movements m
+		    select m.created_at, m.quantity, m.rate from stock_movements m
 		    where m.stock_item_id = s.id and m.kind = 'in' order by m.id desc limit 1) li on true
 		where s.shop_id = $1
 		  and ($2::uuid[] is null or s.location_id = any($2::uuid[]))
@@ -92,7 +93,7 @@ func load(ctx context.Context, q db.Querier, shopID uuid.UUID, locs, ids []strin
 	for rows.Next() {
 		var r row
 		if err := rows.Scan(&r.ID, &r.LocationID, &r.Name, &r.norm, &r.Quantity, &r.Unit, &r.ReorderLevel,
-			&r.IsLow, &r.LastInAt, &r.LastInQuantity); err != nil {
+			&r.IsLow, &r.LastInAt, &r.LastInQuantity, &r.LastInRate); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -186,11 +187,46 @@ func (in *inReq) validate() string {
 		if !(it.Quantity > 0) || it.Quantity > maxQuantity {
 			return fmt.Sprintf("item %d: quantity must be more than 0", n)
 		}
-		if it.Rate != nil && (*it.Rate < 0 || *it.Rate > maxQuantity) {
+		if it.Rate == nil {
+			return fmt.Sprintf("item %d: rate (buying price per unit) is required", n)
+		}
+		if *it.Rate < 0 || *it.Rate > maxQuantity {
 			return fmt.Sprintf("item %d: rate must be 0 or more", n)
 		}
 	}
 	return ""
+}
+
+// Item is one line of opening or added stock.
+type Item = inItem
+
+// ValidateItems cleans the items (trims names, maps units) and returns a message for the first problem, or "".
+func ValidateItems(items []Item) string {
+	r := inReq{LocationID: uuid.New(), Items: items}
+	return r.validate()
+}
+
+// AddItems adds the (validated) items to one location and records a stock-in movement for each.
+func AddItems(ctx context.Context, q db.Querier, shopID, locationID, userID uuid.UUID, source string, items []Item) error {
+	for _, it := range items {
+		var id uuid.UUID
+		if err := q.QueryRow(ctx, `
+			insert into stock_items (shop_id, location_id, name, name_norm, unit, quantity)
+			values ($1, $2, $3, $4, $5, $6)
+			on conflict (shop_id, location_id, name_norm, unit)
+			do update set quantity = stock_items.quantity + excluded.quantity, updated_at = now()
+			returning id`,
+			shopID, locationID, it.Name, names.NormalizeName(it.Name), it.Unit, it.Quantity).Scan(&id); err != nil {
+			return err
+		}
+		if _, err := q.Exec(ctx, `
+			insert into stock_movements (shop_id, location_id, stock_item_id, kind, quantity, rate, source, created_by)
+			values ($1, $2, $3, 'in', $4, $5, $6, $7)`,
+			shopID, locationID, id, it.Quantity, it.Rate, source, userID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // POST /v1/stock/in — the "Add stock" form and the voice save. One transaction.

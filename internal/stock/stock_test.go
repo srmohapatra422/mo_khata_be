@@ -65,7 +65,7 @@ func TestInReqValidate(t *testing.T) {
 		{"huge qty", func(r *inReq) { r.Items[0].Quantity = 1e9 }, "item 1: quantity must be more than 0"},
 		{"negative rate", func(r *inReq) { r.Items[0].Rate = fp(-1) }, "item 1: rate must be 0 or more"},
 		{"zero rate ok", func(r *inReq) { r.Items[0].Rate = fp(0) }, ""},
-		{"no rate ok", func(r *inReq) { r.Items[0].Rate = nil }, ""},
+		{"no rate", func(r *inReq) { r.Items[0].Rate = nil }, "item 1: rate (buying price per unit) is required"},
 		{"second item bad", func(r *inReq) { r.Items = append(r.Items, inItem{Name: "Eggs", Unit: "tray"}) }, "item 2: quantity must be more than 0"},
 	}
 	for _, tt := range tests {
@@ -80,7 +80,7 @@ func TestInReqValidate(t *testing.T) {
 }
 
 func TestInReqValidate_Cleans(t *testing.T) {
-	r := inReq{LocationID: uuid.New(), Items: []inItem{{Name: "  Eggs ", Unit: " Trays ", Quantity: 2}}}
+	r := inReq{LocationID: uuid.New(), Items: []inItem{{Name: "  Eggs ", Unit: " Trays ", Quantity: 2, Rate: fp(90)}}}
 	if msg := r.validate(); msg != "" {
 		t.Fatal(msg)
 	}

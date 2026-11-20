@@ -58,7 +58,9 @@ Every "today", "this week", "this month" and "yesterday" in this API uses the **
 | Stock: read, add stock | yes | yes | yes, farm location only |
 | Stock: wastage | yes | no | yes, farm location only |
 | Stock: reorder level | yes | no | no |
-| Bills, points OTP | yes | yes | yes |
+| Bills (save, history), points OTP, customers (read) | yes | yes | yes (bill history: farm location only) |
+| Edit a customer, record credit payments | yes | yes | no |
+| Customer `is_business` flag | yes | no | no |
 | Expenses | yes | yes | yes, farm location only |
 | Close the day | yes | yes | no |
 | Setup tick, rewards change | yes | no | no |
@@ -68,6 +70,58 @@ Every "today", "this week", "this month" and "yesterday" in this API uses the **
 | Edit shop, categories, locations, offer, staff invite/change/remove, plan, backup, export | yes | no | no |
 
 A farm manager who sends another location, or asks for all locations, only ever gets the farm location. Asking for a shop location returns `403`.
+
+---
+
+## All endpoints at a glance
+
+Access: **public** no token, **token** Bearer token, **any** token + `X-Shop-ID` (all roles), otherwise only the roles listed.
+
+| Method and path | Access | Purpose | Section |
+|---|---|---|---|
+| `GET /health` | public | health check | 1 |
+| `POST /auth/otp/send`, `POST /auth/otp/verify` | public | dev login | 2 |
+| `POST /auth/logout` | token | end this token | 18 |
+| `GET /v1/me` | token | user, shops, locations | 3 |
+| `PATCH /v1/me` | token | edit name, photo, language | 18 |
+| `POST /v1/shops` | token | onboarding (also rewards and opening stock) | 3 |
+| `POST /v1/uploads/logo` | token | upload logo or avatar | 4 |
+| `GET /v1/prices/today`, `POST /v1/items`, `PUT /v1/prices/today` | any / owner / owner | original price endpoints | 5 |
+| `PATCH /v1/items/{id}`, `DELETE /v1/items/{id}` | owner | edit (incl. category), hide item | 18 |
+| `GET /v1/customers`, `GET /v1/customers/summary` | any | customers list (filters, sort, paging), summary counts | 6 |
+| `GET /v1/customers/{id}`, `GET /v1/customers/{id}/points` | any | customer details, points history | 6 |
+| `PATCH /v1/customers/{id}` | owner, cashier | name, WhatsApp consent, business flag (owner) | 6 |
+| `POST /v1/customers/{id}/payments` | owner, cashier | record a credit payment | 6 |
+| `POST /v1/bills` | any | save a bill | 7 |
+| `GET /v1/bills`, `GET /v1/bills/{id}` | any (farm manager: farm only) | bill history and one bill | 7 |
+| `POST /v1/points/otp/send`, `POST /v1/points/otp/verify` | any | verify customer before redeeming points | 8 |
+| `GET /v1/categories` | any | categories the shop sells | 9 |
+| `POST /v1/categories` | owner | add custom category | 9 |
+| `GET /v1/prices` | any | items with today and yesterday | 9 |
+| `POST /v1/prices/items`, `PUT /v1/prices`, `POST /v1/prices/keep-yesterday`, `PATCH /v1/prices/items/{id}` | owner, cashier | manage prices | 9 |
+| `POST /v1/prices/items/bulk`, `DELETE /v1/prices/items/{id}` | owner | ready list, hide item | 9 |
+| `GET /v1/items/match` | any | spelling check | 10 |
+| `GET /v1/stock`, `POST /v1/stock/in` | any (farm manager: farm only) | stock list, add stock | 11 |
+| `POST /v1/stock/{id}/wastage` | owner, farm manager | record wastage | 11 |
+| `PATCH /v1/stock/{id}` | owner | reorder level | 11 |
+| `GET /v1/dashboard` | any | home screen numbers | 12 |
+| `GET /v1/setup`, `PATCH /v1/setup/steps/{id}` | any / owner | setup checklist | 13 |
+| `POST /v1/expenses`, `GET /v1/expenses` | any (farm manager: farm only) | expenses | 14 |
+| `GET /v1/close-day/preview`, `POST /v1/close-day` | owner, cashier | close the day | 15 |
+| `GET /v1/rewards` | any | points rules and reward items | 16 |
+| `PUT /v1/rewards`, `POST /v1/rewards/items`, `DELETE /v1/rewards/items/{id}` | owner | change rewards | 16 |
+| `POST /v1/voice/parse` | any | voice to rows | 17 |
+| `GET /v1/profile` | any | whole Profile screen in one call | 18 |
+| `PATCH /v1/shops/current`, `PUT /v1/shops/current/categories` | owner | edit shop, what you sell | 18 |
+| `GET /v1/locations` / `PUT /v1/locations` | any / owner | shops and farms | 18 |
+| `GET /v1/offer`, `GET /v1/offer/preview` / `PUT /v1/offer` | any / owner | offer of the day | 18 |
+| `GET /v1/staff` | owner, cashier | staff list | 18 |
+| `POST /v1/staff/invite`, `PATCH /v1/staff/{id}`, `DELETE /v1/staff/{id}` | owner | manage staff | 18 |
+| `GET /v1/devices` / `PUT /v1/devices/{device}` | any / owner, cashier | device status | 18 |
+| `POST /v1/devices/whatsapp/test` | owner | queue a test message | 18 |
+| `GET /v1/plan`, `POST /v1/plan/upgrade` | owner | plan, upgrade (501) | 18 |
+| `POST /v1/backups`, `GET /v1/backups/latest` | owner | backup | 18 |
+| `POST /v1/exports`, `GET /v1/exports/{id}` | owner | CSV export | 18 |
 
 ---
 
@@ -190,6 +244,18 @@ Minimal request without positions:
 { "name": "Soumya Poultry", "has_farm": true, "has_shop": true }
 ```
 
+**Optional: onboarding answers saved with the shop.** Send these in the same request so they show up later in `GET /v1/profile`, `GET /v1/rewards` and `GET /v1/stock`:
+```json
+"rewards": { "spend_per_point": 20, "point_value": 0.5, "expiry_months": 6, "max_pay_percent": 30 },
+"stock": [
+  { "location": "farm", "name": "Birds", "unit": "birds", "quantity": 100 },
+  { "location": "shop", "name": "Eggs", "unit": "trays", "quantity": 12, "rate": 180 }
+]
+```
+- `rewards`: all four values are required when it is sent, with the same ranges as `PUT /v1/rewards`. If it is left out, the defaults are 10 / 0.25 / 12 / 50.
+- `stock`: `location` is `farm` or `shop` (default: the shop, else the farm) and must be a location that is switched on. `unit` is `kg`, `birds`, `trays` or `pieces`, `quantity` must be more than 0, `rate` (buying price per unit) is required. Same rules as `POST /v1/stock/in`.
+- A bad value returns `400` with the prefix `rewards:` or `stock:`, and nothing is saved.
+
 Response `201`
 ```json
 {
@@ -217,19 +283,6 @@ Errors
 Shop defaults: 1 point per ₹10 spent, 1 point = ₹0.25, points expire after 12 months, at most 50% of a bill can be paid with points, language `or`.
 
 Logo: upload the image first with `POST /v1/uploads/logo` and send the returned URL as `logo_url`.
-
----|---|---|---|
-| `name` | string | yes | |
-| `has_farm` | bool | no | default `false`. Adds a location named "Poultry farm" |
-| `shop_label` | string | no | default `"Main shop"`. Name of the shop location |
-
-Response `201`
-```json
-{ "id": "ead632e7-8b5f-40f9-bcc6-07cf7e5ff479", "name": "My Shop" }
-```
-Errors: `400` name missing.
-
-Shop defaults: 1 point per ₹10 spent, 1 point = ₹0.25, points expire after 12 months, at most 50% of a bill can be paid with points, language `or`.
 
 ---
 
@@ -340,19 +393,90 @@ Errors: `400` empty list, or an item id that does not belong to this shop. Nothi
 
 ## 6. Customers
 
-### `GET /v1/customers?q=` — shop
+A customer is created automatically on their first bill (`POST /v1/bills` with a `customer_phone`). Phones are 10 digits without the country code. A customer id from another shop always returns `404 customer not found`. Everything about "today", "this month" and "days ago" uses the shop timezone.
 
-Searches this shop's customers by phone or name (case-insensitive, partial match). Returns up to 50, newest first. Without `q`, it returns the 50 newest.
+Derived values (computed on every request, nothing is stored):
 
-Example: `GET /v1/customers?q=9848`
+| Value | Meaning |
+|---|---|
+| `visits` | number of bills of the customer, all time |
+| `last_visit_at`, `last_visit_days` | latest bill. Days are whole calendar days in the shop timezone: `0` today, `1` yesterday. Both `null` when there are no bills |
+| `month_spend` | sum of `payable` of this customer's bills in the current calendar month |
+| `tier` | `business` if `is_business`; otherwise by spend over the last 12 months: `gold` from ₹50,000, `silver` from ₹20,000, else `regular`. Server settings `GOLD_SPEND` and `SILVER_SPEND` change the limits |
+| `due` | credit owed: sum of `payable` of `credit` bills minus the payments recorded below. Never below 0 |
+| `points_worth` | `points × point value` of the shop (₹0.25 by default) |
+| `expiring_points`, `expiry_date` | unused points that expire in the next 30 days, and the earliest such date. `0` and `null` when none |
+| `usually_buys` | up to 3 item names with the most bill lines in the last 90 days (manual lines count by name) |
 
-Response `200`
+Points: the balance is the sum of the customer's points history. Earned points expire after the shop's expiry months (default 12). Redeeming uses the **oldest** earned points first. Points past their date are written off automatically (kind `expired`) the next time the customer or the list is read, or a bill is saved.
+
+### `GET /v1/customers` — shop (any role)
+
+Query (all optional): `q` phone or name (case-insensitive, partial), `filter` = `all` (default), `gold`, `credit_due`, `not_visited_30d` (last bill older than 30 days, or never), `sort` = `recent` (default, newest customer first), `name`, `points`, `due`, `limit` 1 to 100 (default 50), `offset` 0 or more. An unknown `filter` or `sort`, or a bad `limit` or `offset`, returns `400`.
+
+Response `200`: a JSON array. The header `X-Total-Count` is the number of customers matching `q` and `filter` (ignoring `limit` and `offset`).
 ```json
 [
-  { "id": "76763ee2-8937-4872-a9a7-780abcb88c0b", "phone": "9848012345", "name": null, "points": 85 }
+  { "id": "76763ee2-8937-4872-a9a7-780abcb88c0b", "phone": "9848012345", "name": "Ravi Kumar", "points": 85,
+    "tier": "gold", "last_visit_at": "2026-11-19T18:40:00+05:30", "last_visit_days": 1,
+    "visits": 12, "month_spend": 4200, "due": 0, "whatsapp_opted_in": true }
 ]
 ```
-`points` is the customer's current points balance. `name` can be `null`. Customers are created automatically on their first bill.
+`id`, `phone`, `name` and `points` are the original fields; the others were added. `name` can be `null` (show the phone).
+
+### `GET /v1/customers/summary` — shop (any role)
+
+The "184 customers · 11,260 points unredeemed" line and the chip counts.
+```json
+{ "customers": 184, "points_unredeemed": 11260, "credit_due_total": 8400,
+  "credit_due_count": 6, "gold": 9, "not_visited_30d": 31 }
+```
+
+### `GET /v1/customers/{id}` — shop (any role)
+
+```json
+{
+  "id": "76763ee2-8937-4872-a9a7-780abcb88c0b", "phone": "9848012345", "name": "Ravi Kumar", "tier": "gold",
+  "is_business": false, "whatsapp_opted_in": true,
+  "points": 850, "points_worth": 212.5, "expiring_points": 120, "expiry_date": "2026-12-04",
+  "due": 0, "visits": 12, "month_spend": 4200, "total_spend": 38500,
+  "first_visit_at": "2026-03-02T10:15:00+05:30", "last_visit_at": "2026-11-19T18:40:00+05:30",
+  "last_visit_days": 1, "usually_buys": ["Broiler", "Eggs", "Katla"], "created_at": "2026-03-02T10:15:00+05:30"
+}
+```
+Errors: `404` `customer not found`.
+
+### `GET /v1/customers/{id}/points?limit=50&before=<cursor>` — shop (any role)
+
+Points history, newest first. `limit` is 1 to 100. When there is another page, the response has the header `X-Next-Cursor`; send its value as `before` to get the next page.
+```json
+[ { "id": "24", "kind": "earned", "points": 42, "created_at": "2026-11-19T18:40:00+05:30",
+    "bill_id": "0193a1e2-7c4b-7d11-9a2e-5b8f3c1d2e4f", "bill_payable": 420, "note": null } ]
+```
+`id` is an opaque string (not a UUID). `kind` is `earned`, `redeemed`, `expired` or `adjusted`. `points` is positive for earned and negative for redeemed and expired. `bill_id` and `bill_payable` are `null` when no bill is involved. Errors: `400` bad `limit` or `before`, `404`.
+
+### `PATCH /v1/customers/{id}` — owner, cashier
+
+Request: any of these, at least one.
+```json
+{ "name": "Ravi Kumar", "whatsapp_opted_in": true, "is_business": true }
+```
+- `name`: trimmed, 1 to 80 characters, or `null` to clear. An empty string returns `400`.
+- `whatsapp_opted_in`: set `true` only when the customer agreed. The server records who changed it and when.
+- `is_business`: **owner only** (`403` for a cashier).
+
+Response `200`: the details object above. Errors: `400` (empty name, unknown field, nothing to change), `403`, `404`.
+
+### `POST /v1/customers/{id}/payments` — owner, cashier
+
+Records money collected against credit (a customer paying their due). Supports `Idempotency-Key`.
+```json
+{ "amount": 500, "method": "cash", "note": "part payment", "location_id": "<optional>" }
+```
+`method` is `cash`, `upi` or `card`. `note` is optional (up to 200 characters). `location_id` is the counter that took the money; leave it out to use the shop location. Close the day counts these payments in `credit_collected` for that location.
+
+Response `201`: `{ "id": "…", "due_after": 300 }`.
+Errors: `400` (amount 0 or less, bad method, unknown location), `404`, `409` `amount is more than the due`.
 
 ---
 
@@ -375,6 +499,7 @@ Request
   "id": "0193a1e2-7c4b-7d11-9a2e-5b8f3c1d2e4f",
   "location_id": "c0a8e1d2-3b4f-4a5c-8d6e-7f8091a2b3c4",
   "customer_phone": "9848012345",
+  "customer_name": "Ravi Kumar",
   "payment_mode": "upi",
   "points_used": 0,
   "created_at": "2026-11-13T12:30:00+05:30",
@@ -443,15 +568,42 @@ Response `200` (same `id` sent again). It returns the saved bill, and `points_ba
 
 Stock: for each line, the sold quantity is taken off the stock item with the same name (spelling variants count: `Eggs`, `egg`, `anda`) at the bill's location, in the same unit when the unit is known. It never goes below 0, and a bill is never refused because of stock. A line that matches no stock item changes nothing. The same bill id sent twice reduces stock once. `POST /v1/bills` also accepts `Idempotency-Key`.
 
+`customer_name` (optional, 1 to 80 characters) names the customer only when this bill creates the customer or the customer has no name yet. It never replaces an existing name, and is ignored for a walk-in. Leave it out when the name is not asked.
+
+Credit: `payment_mode: "credit"` needs a `customer_phone` (`400` `credit needs a customer`). The amount becomes the customer's `due` until payments are recorded (section 6).
+
 Points rules
 - Redeeming (`points_used > 0`) needs a customer phone that was verified with the OTP endpoints below. Each verification works for one bill.
 - `points_used` cannot be more than the customer's balance.
 - The discount cannot be more than the shop's maximum share of the bill (50% by default).
 
 Errors
-- `400`: bad body, missing field, unknown location, invalid line, `payment_mode` not allowed, or a walk-in bill with points.
+- `400`: bad body, missing field, unknown location, invalid line, `payment_mode` not allowed, or a walk-in bill with points, an empty `customer_name`, or credit without a customer.
 - `403`: `customer phone not verified: send and verify OTP first`.
 - `409`: `not enough points`, or `points exceed the allowed share of this bill`.
+
+---
+
+### `GET /v1/bills` — shop (any role)
+
+Bill history, newest first. Query (all optional): `customer_id`, `from` and `to` (`YYYY-MM-DD` in the shop timezone, `to` included, at most 366 days apart), `limit` 1 to 100 (default 50), `before` (the `X-Next-Cursor` header of the previous page; it is sent when there is another page). A farm manager only sees bills of the farm location.
+```json
+[ { "id": "0193a1e2-7c4b-7d11-9a2e-5b8f3c1d2e4f", "created_at": "2026-11-19T18:40:00+05:30",
+    "customer": { "id": "76763ee2-8937-4872-a9a7-780abcb88c0b", "name": null, "phone": "9848012345" },
+    "payment_mode": "upi", "total": 855, "points_discount": 0, "payable": 855,
+    "points_used": 0, "points_earned": 85, "items_count": 3 } ]
+```
+`customer` is `null` for a walk-in. Errors: `400` (bad date, range over 366 days, bad `limit`, `customer_id` or `before`).
+
+### `GET /v1/bills/{id}` — shop (any role)
+
+The same object plus `location_id` and `lines`:
+```json
+{ "id": "…", "…": "…", "location_id": "c0a8e1d2-3b4f-4a5c-8d6e-7f8091a2b3c4",
+  "lines": [ { "item_id": null, "name": "Mutton", "qty": 0.5, "unit": "kg", "rate": 750, "total": 375,
+               "price_edited": false, "note": "curry pieces" } ] }
+```
+`item_id`, `unit` and `note` can be `null`. `404` `bill not found` when the bill is not in this shop (or a farm manager asks for a shop-location bill).
 
 ---
 
@@ -619,7 +771,7 @@ Stock units are `kg`, `birds`, `trays` and `pieces`. The app may also send `kilo
       "location_id": "c6f2a7b2-1c99-4bf8-a351-00974a9bc286",
       "name": "Broiler", "quantity": 19.5, "unit": "kg",
       "reorder_level": 25, "is_low": true,
-      "last_in_at": "2026-11-16T19:32:55+05:30", "last_in_quantity": 7.5
+      "last_in_at": "2026-11-16T19:32:55+05:30", "last_in_quantity": 7.5, "last_in_rate": 150
     }
   ]
 }
@@ -627,6 +779,7 @@ Stock units are `kg`, `birds`, `trays` and `pieces`. The app may also send `kilo
 - Without `location_id`, all locations are returned (a farm manager only gets the farm).
 - `search` tolerates typos and spelling variants (`broilar` finds `Broiler`, `anda` finds `Eggs`).
 - `is_low` is true when `reorder_level` is set and `quantity <= reorder_level`.
+- `last_in_rate` is the buying price per unit of the last stock-in, so the form can pre-fill it.
 
 ### `POST /v1/stock/in` — all roles (farm manager: farm location only)
 
@@ -646,11 +799,11 @@ The "Add stock" form and the voice save. Supports `Idempotency-Key`. One transac
 | `items[].name` | yes | |
 | `items[].unit` | yes | `kg`, `birds`, `trays`, `pieces` |
 | `items[].quantity` | yes | more than 0 |
-| `items[].rate` | no | purchase price, 0 or more |
+| `items[].rate` | **yes** | buying price per unit (per kg, per tray, ...), 0 or more. The add-stock form must ask for it |
 
 For each row, a stock item with the same name and unit at that location gets the quantity added and **keeps its first spelling**. Otherwise a new stock item is created.
 Response `200`: `{ "saved": 1, "items": [ ...updated stock items as in GET /v1/stock... ] }`.
-Errors: `400` `location_id is required`, `send between 1 and 100 items`, `item 2: quantity must be more than 0`, `item 1: unit must be kg, birds, trays or pieces`, `unknown location`. `403` `farm managers can only use the farm location`.
+Errors: `400` `location_id is required`, `send between 1 and 100 items`, `item 2: quantity must be more than 0`, `item 1: rate (buying price per unit) is required`, `item 1: unit must be kg, birds, trays or pieces`, `unknown location`. `403` `farm managers can only use the farm location`.
 
 ### `PATCH /v1/stock/{id}` — owner
 
@@ -855,7 +1008,7 @@ Response `200` for `stock_in` and `sale`:
 ```
 - `name` is the shop's own item name when one matches, otherwise what was heard. `heard` is the spoken words. `matched` is true when `name` is an item the shop already has.
 - `unit` is `kg`, `tray`, `piece` or `bird`, or `null` when it could not be told. When the user did not say a unit but the item is known, the item's unit is used.
-- `rate` is `null` when no price was said. In `sale` mode a missing rate is filled with the shop's price for a matched item.
+- `rate` is `null` when no price was said. For `stock_in` the app must then ask for the buying price, because `POST /v1/stock/in` requires it. In `sale` mode a missing rate is filled with the shop's price for a matched item.
 - Dozens are converted to pieces (2 dozen becomes `24` `piece`). Grams are converted to kg (500 gram becomes `0.5` kg).
 - Words that are not items, numbers or units (aaj, aaye, ka, and so on) are ignored. A number with no item name is dropped.
 
@@ -890,6 +1043,7 @@ Response `200`
   "offer":   { "enabled": false, "type": "discount", "discount_amount": 20, "min_bill": 500, "product": null, "multiplier": 2 },
   "rewards": { "spend_per_point": 10, "point_value": 0.25, "expiry_months": 12, "max_pay_percent": 50 },
   "staff":   { "count": 2 },
+  "stock":   { "items": 12, "low": 2 },
   "plan":    { "plan": "trial", "trial_days_left": 11, "trial_ends_at": "2026-12-01T17:06:22+05:30",
                "current_period_end": null, "last_backup_at": null },
   "devices": { "whatsapp": false, "printer": false, "scale": false, "all_connected": false }
@@ -897,6 +1051,7 @@ Response `200`
 ```
 - `plan` is `null` unless the caller is the owner. A farm manager sees only the farm in `shop.locations`.
 - `staff.count` counts active members and pending invites.
+- `stock.items` is the number of stock items, and `stock.low` how many are at or below their reorder level. A farm manager only counts the farm. The full list is `GET /v1/stock`.
 - `trial_days_left` = `max(0, ceil((trial_ends_at - now) / 24h))`, and `0` when the plan is not `trial`. The trial is 14 days from shop creation (`TRIAL_DAYS` on the server).
 - `offer` is created with defaults the first time it is read. `rewards` is the same data as `GET /v1/rewards`: the server value wins over any default the app shows.
 - The shop `name` is the business name that prints on bills.
@@ -1058,7 +1213,7 @@ Send the same `Authorization: Bearer` token you want to end. Response `204`. The
 3. Send `Authorization` and `X-Shop-ID` on everything below.
 4. New shop: show `GET /v1/setup` as the checklist. Prices: `POST /v1/prices/items/bulk` (ready list) or `POST /v1/prices/items`, and `PUT /v1/prices` each morning. Stock: `POST /v1/stock/in`.
 5. Home screen: `GET /v1/dashboard?period=today`.
-6. Per customer: `GET /v1/customers?q=`. To redeem points, call `/v1/points/otp/send` then `/v1/points/otp/verify`.
+6. Customers tab: `GET /v1/customers/summary` and `GET /v1/customers?filter=`; tap one for `GET /v1/customers/{id}` and `/points`. At billing, `GET /v1/customers?q=`. To redeem points, call `/v1/points/otp/send` then `/v1/points/otp/verify`.
 7. `POST /v1/bills` with an `Idempotency-Key`. Retry with the same key if the network drops.
 8. Voice: `POST /v1/voice/parse`, show the rows, and on confirm call the save endpoint for that mode.
 9. End of day: `GET /v1/close-day/preview`, then `POST /v1/close-day` with the counted cash and stock.
@@ -1068,6 +1223,6 @@ Send the same `Authorization: Bearer` token you want to end. Response `204`. The
 - The offer of the day is stored and previewed, but `POST /v1/bills` does not apply it yet (no automatic discount or points multiplier).
 - Logging out every device at once.
 - Sending WhatsApp messages. The rate broadcast and the owner's day summary are queued only.
-- Recording credit payments from customers (the close-day screen already counts them once they exist).
 - An opening cash float for close-day.
-- Editing the shop timezone, bill history, and sync.
+- Editing the shop timezone, and sync.
+- Editing or cancelling a saved bill.

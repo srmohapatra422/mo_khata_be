@@ -12,8 +12,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mohisab-api/internal/auth"
+	"mohisab-api/internal/customers"
 	"mohisab-api/internal/httpx"
 	"mohisab-api/internal/otp"
+	"mohisab-api/internal/points"
+	"mohisab-api/internal/shoptime"
 	"mohisab-api/internal/stock"
 )
 
@@ -33,6 +36,7 @@ type billIn struct {
 	ID            uuid.UUID `json:"id"` // made on the phone (UUID v7)
 	LocationID    uuid.UUID `json:"location_id"`
 	CustomerPhone string    `json:"customer_phone"` // empty = walk-in
+	CustomerName  *string   `json:"customer_name"`  // optional; only names a customer that has no name yet
 	PaymentMode   string    `json:"payment_mode"`   // cash | upi | card | credit
 	PointsUsed    int       `json:"points_used"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -70,6 +74,19 @@ func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now()
+	}
+	if in.PaymentMode == "credit" && strings.TrimSpace(in.CustomerPhone) == "" {
+		httpx.Error(w, http.StatusBadRequest, "credit needs a customer")
+		return
+	}
+	var customerName *string
+	if in.CustomerName != nil {
+		n, err := customers.CleanName(*in.CustomerName)
+		if err != nil {
+			httpx.Fail(w, err)
+			return
+		}
+		customerName = &n
 	}
 
 	ctx := r.Context()
@@ -138,9 +155,9 @@ func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if phone != "" {
 		var cid uuid.UUID
 		if err := tx.QueryRow(ctx, `
-			insert into customers (shop_id, phone) values ($1, $2)
-			on conflict (shop_id, phone) do update set phone = excluded.phone
-			returning id`, m.ShopID, phone).Scan(&cid); err != nil {
+			insert into customers (shop_id, phone, name) values ($1, $2, $3)
+			on conflict (shop_id, phone) do update set name = coalesce(customers.name, excluded.name)
+			returning id`, m.ShopID, phone, customerName).Scan(&cid); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "database error")
 			return
 		}
@@ -148,6 +165,11 @@ func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 		// Lock this customer's points while we check the balance.
 		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, cid.String()); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "database error")
+			return
+		}
+		// Points past their expiry date are taken off before the balance is read.
+		if _, err := points.ExpireDue(ctx, tx, m.ShopID, &cid, time.Now().In(m.Location()).Format(shoptime.DateLayout)); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "database error")
 			return
 		}

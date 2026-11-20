@@ -100,6 +100,19 @@ func (in putIn) validate() string {
 	return ""
 }
 
+// Check validates the four points settings (all required) and returns a message, or "".
+func Check(spend *int, value *float64, expiry *int, maxPay *int) string {
+	return putIn{SpendPerPoint: spend, PointValue: value, ExpiryMonths: expiry, MaxPayPercent: maxPay}.validate()
+}
+
+// Save writes the points settings of a shop. Call Check first.
+func Save(ctx context.Context, q db.Querier, shopID uuid.UUID, spend int, value float64, expiry, maxPay int) error {
+	_, err := q.Exec(ctx, `
+		update shops set points_per_rupees = $2, point_value = $3, points_expiry_months = $4, max_points_pct = $5
+		where id = $1`, shopID, spend, math.Round(value*100)/100, expiry, maxPay)
+	return err
+}
+
 // PUT /v1/rewards (owner). Returns the same body as GET.
 func (h Handler) Put(w http.ResponseWriter, r *http.Request) {
 	var in putIn

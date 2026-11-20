@@ -80,7 +80,7 @@ func main() {
 	shopH := shops.Handler{DB: pool, LogoPrefix: logoPrefix, TrialDays: cfg.TrialDays}
 	profH := profile.Handler{DB: pool, LogoPrefix: logoPrefix, TrialDays: cfg.TrialDays, Storage: storage}
 	catH := catalogue.Handler{DB: pool}
-	custH := customers.Handler{DB: pool}
+	custH := customers.Handler{DB: pool, GoldSpend: cfg.GoldSpend, SilverSpend: cfg.SilverSpend}
 	billH := billing.Handler{DB: pool}
 	priceH := pricing.Handler{DB: pool}
 	stockH := stock.Handler{DB: pool}
@@ -141,6 +141,13 @@ func main() {
 			r.With(auth.RequireRoles("owner", "cashier")).Put("/devices/{device}", profH.PutDevice)
 			r.With(auth.RequireRoles("owner", "cashier")).Get("/staff", profH.ListStaff)
 			r.Get("/customers", custH.List)
+			r.Get("/customers/summary", custH.Summary)
+			r.Get("/customers/{id}", custH.Get)
+			r.Get("/customers/{id}/points", custH.Points)
+			r.With(auth.RequireRoles("owner", "cashier")).Patch("/customers/{id}", custH.Patch)
+			r.With(auth.RequireRoles("owner", "cashier"), idemS.Middleware).Post("/customers/{id}/payments", custH.Pay)
+			r.Get("/bills", billH.List)
+			r.Get("/bills/{id}", billH.Get)
 			r.With(idemS.Middleware).Post("/bills", billH.Create)
 			r.Post("/points/otp/send", otpH.Send)
 			r.Post("/points/otp/verify", otpH.Verify)

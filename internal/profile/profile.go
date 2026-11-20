@@ -190,6 +190,10 @@ type profileOut struct {
 	Staff struct {
 		Count int `json:"count"`
 	} `json:"staff"`
+	Stock struct {
+		Items int `json:"items"` // stock items (farm only for a farm manager)
+		Low   int `json:"low"`   // at or below their reorder level
+	} `json:"stock"`
 	Plan    *planOut `json:"plan"`
 	Devices struct {
 		WhatsApp     bool `json:"whatsapp"`
@@ -220,6 +224,14 @@ func (h Handler) Get(w http.ResponseWriter, r *http.Request) {
 		       (select count(*) from members where shop_id = $1 and status = 'active')::int
 		       + (select count(*) from staff_invites where shop_id = $1)::int`, m.ShopID, day).
 		Scan(&out.Prices.Count, &out.Prices.UpdatedToday, &out.Staff.Count); err != nil {
+		httpx.Fail(w, err)
+		return
+	}
+	if err = h.DB.QueryRow(ctx, `
+		select count(*)::int, count(*) filter (where si.reorder_level is not null and si.quantity <= si.reorder_level)::int
+		from stock_items si join locations l on l.id = si.location_id
+		where si.shop_id = $1 and ($2::text <> 'farm_manager' or l.type = 'farm')`, m.ShopID, m.Role).
+		Scan(&out.Stock.Items, &out.Stock.Low); err != nil {
 		httpx.Fail(w, err)
 		return
 	}

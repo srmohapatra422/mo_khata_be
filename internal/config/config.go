@@ -20,6 +20,10 @@ type Config struct {
 	SupabaseServiceKey string
 	StorageURL         string // default: <SUPABASE_URL>/storage/v1
 
+	// Customer tiers, by spend over the last 12 months (rupees).
+	GoldSpend   float64 // GOLD_SPEND, default 50000
+	SilverSpend float64 // SILVER_SPEND, default 20000
+
 	TrialDays int // length of the free trial for a new shop (TRIAL_DAYS, default 14)
 }
 
@@ -40,6 +44,7 @@ func Load() Config {
 	if n, err := strconv.Atoi(os.Getenv("TRIAL_DAYS")); err == nil && n > 0 {
 		c.TrialDays = n
 	}
+	c.GoldSpend, c.SilverSpend = envFloat("GOLD_SPEND", 50000), envFloat("SILVER_SPEND", 20000)
 	if c.DatabaseURL == "" || c.SupabaseURL == "" {
 		log.Fatal("DATABASE_URL and SUPABASE_URL are required")
 	}
@@ -52,6 +57,13 @@ func Load() Config {
 func getenv(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
+	}
+	return def
+}
+
+func envFloat(k string, def float64) float64 {
+	if f, err := strconv.ParseFloat(os.Getenv(k), 64); err == nil && f >= 0 {
+		return f
 	}
 	return def
 }

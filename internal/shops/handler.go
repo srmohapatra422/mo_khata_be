@@ -13,6 +13,8 @@ import (
 	"mohisab-api/internal/auth"
 	"mohisab-api/internal/httpx"
 	"mohisab-api/internal/profile"
+	"mohisab-api/internal/rewards"
+	"mohisab-api/internal/stock"
 )
 
 type Handler struct {
@@ -110,6 +112,26 @@ type createShopIn struct {
 
 	FarmLocation *geoIn `json:"farm_location"` // optional lat/lng of the farm
 	ShopLocation *geoIn `json:"shop_location"` // optional lat/lng of the shop
+
+	// Optional: the "Reward your buyers" and "Opening stock" answers from onboarding.
+	Rewards *rewardsIn `json:"rewards"`
+	Stock   []stockIn  `json:"stock"`
+}
+
+type rewardsIn struct {
+	SpendPerPoint *int     `json:"spend_per_point"`
+	PointValue    *float64 `json:"point_value"`
+	ExpiryMonths  *int     `json:"expiry_months"`
+	MaxPayPercent *int     `json:"max_pay_percent"`
+}
+
+// stockIn is one opening stock line. location is "farm" or "shop" (default: the shop, else the farm).
+type stockIn struct {
+	Location string   `json:"location"`
+	Name     string   `json:"name"`
+	Unit     string   `json:"unit"`
+	Quantity float64  `json:"quantity"`
+	Rate     *float64 `json:"rate"`
 }
 
 // geoIn is a map position. Both values are needed together.
@@ -213,6 +235,36 @@ func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
 		logo = &u
 	}
 
+	if in.Rewards != nil {
+		if msg := rewards.Check(in.Rewards.SpendPerPoint, in.Rewards.PointValue, in.Rewards.ExpiryMonths, in.Rewards.MaxPayPercent); msg != "" {
+			httpx.Error(w, http.StatusBadRequest, "rewards: "+msg)
+			return
+		}
+	}
+	stockItems := make([]stock.Item, len(in.Stock))
+	stockLoc := make([]string, len(in.Stock))
+	for i, si := range in.Stock {
+		loc := strings.ToLower(strings.TrimSpace(si.Location))
+		if loc == "" {
+			loc = "shop"
+			if !hasShop {
+				loc = "farm"
+			}
+		}
+		if (loc != "farm" || !in.HasFarm) && (loc != "shop" || !hasShop) {
+			httpx.Error(w, http.StatusBadRequest, "stock: location must be farm or shop, and that location must be switched on")
+			return
+		}
+		stockLoc[i] = loc
+		stockItems[i] = stock.Item{Name: si.Name, Unit: si.Unit, Quantity: si.Quantity, Rate: si.Rate}
+	}
+	if len(stockItems) > 0 {
+		if msg := stock.ValidateItems(stockItems); msg != "" {
+			httpx.Error(w, http.StatusBadRequest, "stock: "+msg)
+			return
+		}
+	}
+
 	ctx := r.Context()
 	tx, err := h.DB.Begin(ctx)
 	if err != nil {
@@ -267,6 +319,33 @@ func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasShop {
 		if err := add(in.ShopLabel, "shop", in.ShopLocation); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "database error")
+			return
+		}
+	}
+	if r := in.Rewards; r != nil {
+		if err := rewards.Save(ctx, tx, shopID, *r.SpendPerPoint, *r.PointValue, *r.ExpiryMonths, *r.MaxPayPercent); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "database error")
+			return
+		}
+	}
+	for _, loc := range []string{"farm", "shop"} {
+		var batch []stock.Item
+		for i, it := range stockItems {
+			if stockLoc[i] == loc {
+				batch = append(batch, it)
+			}
+		}
+		if len(batch) == 0 {
+			continue
+		}
+		var locID uuid.UUID
+		for _, l := range locations {
+			if l.Type == loc {
+				locID = l.ID
+			}
+		}
+		if err := stock.AddItems(ctx, tx, shopID, locID, auth.UserID(ctx), "form", batch); err != nil {
 			httpx.Error(w, http.StatusInternalServerError, "database error")
 			return
 		}
